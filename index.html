@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Gin + Gorilla WebSocket Demo</title>
+</head>
+<body>
+<h2>WebSocket Chat</h2>
+<input id="msg" placeholder="Type a message..." />
+<button onclick="send()">Send</button>
+<ul id="log"></ul>
+
+<script>
+const ws = new WebSocket("ws://" + location.host + "/ws");
+
+ws.onmessage = e => {
+  const li = document.createElement("li");
+  li.textContent = e.data;
+  document.getElementById("log").appendChild(li);
+};
+
+function send() {
+  const input = document.getElementById("msg");
+  ws.send(input.value);
+  input.value = "";
+}
+</script>
+</body>
+</html>
