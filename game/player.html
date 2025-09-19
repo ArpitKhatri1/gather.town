@@ -1,0 +1,240 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Simple Player (200x200)</title>
+  <style>
+    body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial; display:flex; gap:20px; padding:20px; }
+    #game { border: 2px solid #222; background:#f8f8f8; }
+    #ui { min-width:220px; }
+    .status { margin-bottom: 8px; }
+    .legend { margin-top: 10px; font-size: 13px; color:#444; }
+    .dot { display:inline-block; width:12px; height:12px; border-radius:6px; margin-right:6px; vertical-align:middle; }
+  </style>
+</head>
+<body>
+  <canvas id="game" width="200" height="200"></canvas>
+
+  <div id="ui">
+    <div class="status"><strong>Connection:</strong> <span id="conn">connecting...</span></div>
+    <div><strong>Controls</strong>
+      <div>Arrow keys or WASD — hold to move</div>
+    </div>
+
+    <div class="legend">
+      <div><span class="dot" style="background:#1f77b4"></span> Other players</div>
+      <div><span class="dot" style="background:#ff7f0e"></span> You (client prediction)</div>
+    </div>
+
+    <div style="margin-top:12px;">
+      <div><strong>Local predicted pos:</strong> <span id="localPos">-</span></div>
+      <div><strong>Players received:</strong> <span id="count">0</span></div>
+    </div>
+  </div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const connEl = document.getElementById('conn');
+  const localPosEl = document.getElementById('localPos');
+  const countEl = document.getElementById('count');
+
+  // WebSocket URL (works with ws or wss)
+  const wsProtocol = (location.protocol === 'https:') ? 'wss:' : 'ws:';
+  const wsUrl = wsProtocol + '//' + location.host + '/ws';
+
+  let socket;
+  function connect() {
+    socket = new WebSocket(wsUrl);
+    socket.addEventListener('open', () => {
+      connEl.textContent = 'connected';
+      connEl.style.color = 'green';
+    });
+    socket.addEventListener('close', () => {
+      connEl.textContent = 'disconnected — retrying...';
+      connEl.style.color = 'crimson';
+      setTimeout(connect, 1500);
+    });
+    socket.addEventListener('error', (e) => {
+      console.error('ws error', e);
+    });
+
+    socket.addEventListener('message', (ev) => {
+      try {
+        const payload = JSON.parse(ev.data);
+        // Expect payload to be an array of {x,y} objects (server state)
+        if (Array.isArray(payload)) {
+          latestServerState = payload.map(p => ({ x: Number(p.x), y: Number(p.y) }));
+          countEl.textContent = latestServerState.length;
+          reconcileWithServer();
+        }
+      } catch (err) {
+        console.warn('failed to parse server message', err, ev.data);
+      }
+    });
+  }
+
+  connect();
+
+  // Board size
+  const BOARD_W = 200;
+  const BOARD_H = 200;
+
+  // Local predicted player state (we start at 1,1 like server)
+  const me = { x: 1, y: 1 };
+
+  // Latest authoritative state received from server (array of {x,y})
+  let latestServerState = [];
+
+  // We'll heuristically find which server entry corresponds to "me"
+  let selfIndex = -1;
+
+  // Input sending loop (when keys held)
+  let sendInterval = null;
+  const SEND_MS = 50; // send input every 50ms while held
+  const keys = { up: false, down: false, left: false, right: false };
+
+  function computeDxDyFromKeys() {
+    const dx = (keys.right ? 1 : 0) + (keys.left ? -1 : 0);
+    const dy = (keys.down ? 1 : 0) + (keys.up ? -1 : 0);
+    // Clamp to -1, 0, 1
+    return { dx: Math.max(-1, Math.min(1, dx)), dy: Math.max(-1, Math.min(1, dy)) };
+  }
+
+  function startSending() {
+    if (sendInterval) return;
+    sendInterval = setInterval(() => {
+      if (socket && socket.readyState === WebSocket.OPEN) {
+        const { dx, dy } = computeDxDyFromKeys();
+        // Only send when something changes or non-zero
+        if (dx !== 0 || dy !== 0) {
+          socket.send(JSON.stringify({ dx: dx, dy: dy }));
+          // local prediction: move immediately
+          me.x += dx;
+          me.y += dy;
+          clampMe();
+        }
+      }
+    }, SEND_MS);
+  }
+  function stopSendingIfIdle() {
+    // if no keys pressed, we can keep interval but it simply won't send any non-zero
+    // optionally we can clear interval when no keys are pressed
+    // we'll keep it simple and keep setInterval running once started
+  }
+
+  function clampMe(){
+    if (me.x < 0) me.x = 0;
+    if (me.x > BOARD_W - 1) me.x = BOARD_W - 1;
+    if (me.y < 0) me.y = 0;
+    if (me.y > BOARD_H - 1) me.y = BOARD_H - 1;
+    localPosEl.textContent = `${me.x}, ${me.y}`;
+  }
+
+  // Key handling
+  window.addEventListener('keydown', (e) => {
+    const prev = { ...keys };
+    if (e.key === 'ArrowUp' || e.key === 'w' || e.key === 'W') keys.up = true;
+    if (e.key === 'ArrowDown' || e.key === 's' || e.key === 'S') keys.down = true;
+    if (e.key === 'ArrowLeft' || e.key === 'a' || e.key === 'A') keys.left = true;
+    if (e.key === 'ArrowRight' || e.key === 'd' || e.key === 'D') keys.right = true;
+
+    if (JSON.stringify(prev) !== JSON.stringify(keys)) {
+      startSending();
+    }
+  });
+
+  window.addEventListener('keyup', (e) => {
+    const prev = { ...keys };
+    if (e.key === 'ArrowUp' || e.key === 'w' || e.key === 'W') keys.up = false;
+    if (e.key === 'ArrowDown' || e.key === 's' || e.key === 'S') keys.down = false;
+    if (e.key === 'ArrowLeft' || e.key === 'a' || e.key === 'A') keys.left = false;
+    if (e.key === 'ArrowRight' || e.key === 'd' || e.key === 'D') keys.right = false;
+
+    if (JSON.stringify(prev) !== JSON.stringify(keys)) {
+      // keys changed; no special action required here because sendInterval continues
+    }
+  });
+
+  // Reconcile heuristic:
+  // - find the server player entry that is closest to our local predicted position
+  // - treat that entry as "self" and align me to its authoritative coordinates
+  function reconcileWithServer() {
+    if (latestServerState.length === 0) {
+      selfIndex = -1;
+      return;
+    }
+    let bestIndex = -1;
+    let bestDist = Infinity;
+    for (let i = 0; i < latestServerState.length; i++) {
+      const p = latestServerState[i];
+      const d = Math.hypot(p.x - me.x, p.y - me.y);
+      if (d < bestDist) {
+        bestDist = d;
+        bestIndex = i;
+      }
+    }
+    // If the closest entity is reasonably near (<20 px), assume it's us; else don't set
+    if (bestDist < 30) {
+      selfIndex = bestIndex;
+      // Snap/pull our predicted pos toward authoritative pos (simple reconciliation)
+      const authoritative = latestServerState[selfIndex];
+      me.x = authoritative.x;
+      me.y = authoritative.y;
+      clampMe();
+    } else {
+      selfIndex = -1;
+    }
+  }
+
+  // Rendering
+  function draw() {
+    ctx.clearRect(0,0,BOARD_W,BOARD_H);
+
+    // background grid (optional)
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0,0,BOARD_W,BOARD_H);
+
+    // draw players from server
+    for (let i = 0; i < latestServerState.length; i++) {
+      const p = latestServerState[i];
+      // if this index matches our selfIndex, draw differently
+      if (i === selfIndex) {
+        ctx.fillStyle = '#ff7f0e'; // orange = me (authoritative)
+      } else {
+        ctx.fillStyle = '#1f77b4'; // blue = others
+      }
+      drawPlayerAt(p.x, p.y);
+    }
+
+    // draw our predicted position on top (outline)
+    ctx.strokeStyle = '#333';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.arc(me.x + 0.5, me.y + 0.5, 4, 0, Math.PI*2);
+    ctx.stroke();
+
+    requestAnimationFrame(draw);
+  }
+
+  function drawPlayerAt(x, y) {
+    // positions are integers in [0..199], map directly to pixels
+    ctx.beginPath();
+    ctx.arc(x + 0.5, y + 0.5, 4, 0, Math.PI*2);
+    ctx.fill();
+  }
+
+  // Start render loop
+  draw();
+
+  // keep local pos shown initially
+  clampMe();
+
+  // expose for debugging
+  window.__g = { me, latestServerState, socket };
+
+})();
+</script>
+</body>
+</html>
